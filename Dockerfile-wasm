@@ -1,0 +1,5 @@
+FROM scratch
+
+COPY  EdgeGuard.wasm EdgeGuard.wasm
+
+ENTRYPOINT [ "EdgeGuard.wasm" ]
