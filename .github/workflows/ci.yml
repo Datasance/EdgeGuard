@@ -91,7 +91,7 @@ jobs:
       id: build_push_wasm_ghcr
       with:
         context: .
-        file: Dockerfile-new
+        file: Dockerfile-wasm
         platforms: wasip1/wasm
         push: true
         tags: |
