@@ -2,25 +2,27 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/stealthrocket/net/wasip1"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
-	"github.com/stealthrocket/net/wasip1"
 )
 
 const (
-	defaultHALURL = "iofog"
-	defaultPort   = "54331"
+	defaultHALURL  = "iofog"
+	defaultPort    = "54331"
 	deprovisionURL = "http://iofog:54321/v2/deprovision"
-	defaultPeriod = 60 // Default to 10 minutes if PERIOD is not set
+	defaultPeriod  = 60 // Default to 1 minute if PERIOD is not set
+	saltFile       = "id/salt-key"
+	hwidFile       = "id/hw-id"
 )
 
 type HardwareData struct {
@@ -30,8 +32,6 @@ type HardwareData struct {
 	Lshw    map[string]interface{} `json:"lshw"`
 	CpuInfo map[string]interface{} `json:"cpuinfo"`
 }
-
-var salt string // Global variable to hold the salt in memory
 
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
@@ -73,42 +73,28 @@ func collectHardwareData(baseURL string) (*HardwareData, error) {
 
 		switch endpoint {
 		case "lscpu":
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				data.Lscpu = resultMap
-			} else {
-				data.Lscpu = map[string]interface{}{"data": result}
-			}
+			data.Lscpu = parseToMap(result)
 		case "lspci":
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				data.Lspci = resultMap
-			} else {
-				data.Lspci = map[string]interface{}{"data": result}
-			}
+			data.Lspci = parseToMap(result)
 		case "lsusb":
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				data.Lsusb = resultMap
-			} else {
-				data.Lsusb = map[string]interface{}{"data": result}
-			}
+			data.Lsusb = parseToMap(result)
 		case "lshw":
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				data.Lshw = resultMap
-			} else {
-				data.Lshw = map[string]interface{}{"data": result}
-			}
+			data.Lshw = parseToMap(result)
 		case "proc/cpuinfo":
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				data.CpuInfo = resultMap
-			} else {
-				data.CpuInfo = map[string]interface{}{"data": result}
-			}
+			data.CpuInfo = parseToMap(result)
 		}
 	}
 
 	return data, nil
 }
 
-// Generate a random salt
+func parseToMap(data interface{}) map[string]interface{} {
+	if resultMap, ok := data.(map[string]interface{}); ok {
+		return resultMap
+	}
+	return map[string]interface{}{"data": data}
+}
+
 func generateSalt() (string, error) {
 	salt := make([]byte, 16) // 16-byte salt
 	_, err := rand.Read(salt)
@@ -118,27 +104,37 @@ func generateSalt() (string, error) {
 	return base64.StdEncoding.EncodeToString(salt), nil
 }
 
-// Calculate the salted hash of the hardware data
+func saveToFile(filename, data string) error {
+	return ioutil.WriteFile(filename, []byte(data), 0600)
+}
+
+func loadFromFile(filename string) (string, error) {
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(data)), nil
+}
+
 func calculateSaltedHash(data *HardwareData) (string, error) {
-	// Marshal the hardware data to JSON
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize hardware data: %w", err)
 	}
 
-	// If salt is empty, generate a new one
-	if salt == "" {
-		var err error
+	salt, err := loadFromFile(saltFile)
+	if err != nil {
+		log.Println("Salt not found, generating new one.")
 		salt, err = generateSalt()
 		if err != nil {
 			return "", fmt.Errorf("failed to generate salt: %w", err)
 		}
+		if err := saveToFile(saltFile, salt); err != nil {
+			return "", fmt.Errorf("failed to save salt to file: %w", err)
+		}
 	}
 
-	// Combine the salt and hardware data
 	saltedData := append([]byte(salt), jsonData...)
-
-	// Calculate the SHA256 hash of the salted data
 	hash := sha256.Sum256(saltedData)
 	return fmt.Sprintf("%x", hash), nil
 }
@@ -179,7 +175,6 @@ func init() {
 	}
 }
 
-
 func main() {
 	halURL := getEnv("HAL_URL", defaultHALURL)
 	periodEnv := getEnv("PERIOD", strconv.Itoa(defaultPeriod))
@@ -189,7 +184,10 @@ func main() {
 		period = defaultPeriod
 	}
 
-	var initialHdID string
+	initialHdID, err := loadFromFile(hwidFile)
+	if err != nil {
+		log.Println("HWID not found, will calculate on first run.")
+	}
 
 	for {
 		hardwareData, err := collectHardwareData(halURL)
@@ -207,6 +205,9 @@ func main() {
 
 		if initialHdID == "" {
 			initialHdID = hwID
+			if err := saveToFile(hwidFile, hwID); err != nil {
+				log.Printf("Error saving HWID to file: %v", err)
+			}
 			log.Println("Initial hardware ID set.")
 			continue
 		}
